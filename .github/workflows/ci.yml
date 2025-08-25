@@ -2,17 +2,21 @@
 on:
   push: { branches: [ main ] }
   pull_request: { branches: [ main ] }
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.11" }
+        with:
+          python-version: "3.11"
       - run: pip install -r requirements.txt
       - run: pip install pytest flake8
       # fail only on likely-bug errors
       - run: flake8 --count --select=E9,F63,F7,F82 --show-source --statistics
-      # report everything else but don't fail the build
+      # report the rest but don't fail
       - run: flake8 --count --exit-zero --max-line-length=120 --statistics
-      - run: pytest -q
+      # allow "no tests collected" (exit 5) to pass
+      - name: pytest (allow no tests)
+        run: pytest -q || [ $? -eq 5 ]
