@@ -1,0 +1,11 @@
+{
+    "strategy_name": "scalping",
+    "symbol_ccxt": "BTC/USDT",
+    "total_budget_usdt": 1000.0,
+    "last_updated": "2025-08-25T14:04:49.299176",
+    "risk_per_trade_pct": 0.015,
+    "stop_loss_pct": 0.01,
+    "take_profit_pct": 0.01,
+    "rsi_oversold": 30,
+    "rsi_overbought": 70
+}
