@@ -1,0 +1,11 @@
+﻿{
+    "required_pull_request_reviews":  null,
+    "restrictions":  null,
+    "enforce_admins":  true,
+    "required_status_checks":  {
+                                   "contexts":  [
+                                                    "test"
+                                                ],
+                                   "strict":  true
+                               }
+}

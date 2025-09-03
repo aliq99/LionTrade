@@ -1,71 +1,116 @@
-import os
-import time
-from openai import OpenAI
+﻿import datetime as dt
 import json
-from datetime import datetime
+import logging
+import os
+import pathlib
+import time
+from typing import Any, Dict, List
+
+from openai import OpenAI
+
+from metrics.telemetry import METRICS
+
+log = logging.getLogger("momo")
+
+
+def _normalize_label(label: str) -> str:
+    if not label:
+        return "Neutral"
+    line = label.strip().lower()
+    mapping = {
+        "bull": "Bullish",
+        "bullish": "Bullish",
+        "based": "Bullish",
+        "risk-on": "Bullish",
+        "bear": "Bearish",
+        "bearish": "Bearish",
+        "risk-off": "Bearish",
+        "neutral": "Neutral",
+        "range": "Neutral",
+        "sideways": "Neutral",
+        "flat": "Neutral",
+        "chop": "Neutral",
+    }
+    return mapping.get(line, "Neutral")
+
 
 class AI_Analyzer:
+    """Caches sentiment. Writes ai_status.json for UI and updates Prometheus."""
+
     def __init__(self):
+        self.client = OpenAI()
+        self.last_label: str = "Neutral"
+        self.last_score: float = 0.50
+        self.last_analysis_time: float = 0.0
+        self.cache_duration: int = int(os.getenv("AI_CACHE_SECONDS", "900"))
+        self._status_path = (
+            pathlib.Path(__file__).resolve().parents[1] / "ai_status.json"
+        )
+
+    def get_current_sentiment(self) -> str:
+        return self.last_label
+
+    def _classify(self, headlines: List[str]) -> Dict[str, Any]:
+        prompt = (
+            "Decide crypto market sentiment from headlines. "
+            "Output a single line: <Label> <Score>. Label in {Bullish,Bearish,Neutral}. "
+            "Score in [0,1].\n" + "\n".join(f"- {h}" for h in headlines[:10])
+        )
+        r = self.client.responses.create(
+            model=os.getenv("OPENAI_SENTIMENT_MODEL", "gpt-4o-mini"),
+            input=prompt,
+            temperature=0,
+            timeout=8.0,
+        )
+        text = r.output_text.strip().replace("%", "")
+        parts = text.split()
+        label = _normalize_label(parts[0] if parts else "")
         try:
-            self.client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-            self.sentiment = "Neutral"
-            self.last_analysis_time = 0
-            self.cache_duration = 60 * 15 # Cache sentiment for 15 minutes
-            print("AI_Analyzer Initialized.")
-        except Exception as e:
-            print(f"Error initializing OpenAI client: {e}")
-            self.client = None
+            score = float(parts[-1])
+            if score > 1:
+                score = score / 100.0
+        except Exception:
+            score = 0.50
+        return {"label": label, "score": max(0.0, min(1.0, score))}
 
-    def get_current_sentiment(self):
-        """Returns the cached sentiment."""
-        return self.sentiment
-
-    def refresh_sentiment(self):
-        """Fetches news, updates sentiment, and saves status to a file."""
-        current_time = time.time()
-        if (current_time - self.last_analysis_time) < self.cache_duration:
-            return
-
-        print("AI sentiment cache expired. Requesting new analysis...")
-        headlines = self._fetch_market_news()
-        self.sentiment = self._get_sentiment_from_ai(headlines)
-        self.last_analysis_time = current_time
-        print(f"--- New AI Sentiment: {self.sentiment} ---")
-
-        status = {
-            "sentiment": self.sentiment,
-            "headlines": headlines,
-            "last_updated": datetime.now().isoformat()
-        }
+    def _write_status(self) -> None:
         try:
-            with open("ai_status.json", "w") as f:
-                json.dump(status, f, indent=4)
-        except Exception as e:
-            print(f"Error saving AI status file: {e}")
+            status = {
+                "sentiment": self.last_label,
+                "confidence": float(self.last_score),
+                "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(
+                    timespec="seconds"
+                ),
+            }
+            with open(self._status_path, "w", encoding="utf-8") as f:
+                json.dump(status, f)
+        except Exception:
+            pass
 
-    def _fetch_market_news(self):
-        """Placeholder for fetching news."""
-        return [
-            "Bitcoin surges past resistance as institutional interest grows.",
-            "Ethereum developers announce successful merge update, network efficiency up.",
-            "Regulatory concerns in Asia cast a shadow over short-term crypto market.",
-        ]
-
-    def _get_sentiment_from_ai(self, headlines):
-        """Analyzes headlines using the OpenAI API."""
-        if not self.client: return "Neutral"
-        formatted_headlines = "\n- ".join(headlines)
-        try:
-            response = self.client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[
-                    {"role": "system", "content": "You are a financial analyst. Analyze the sentiment of crypto news headlines. Respond with only a single word: Bullish, Bearish, or Neutral."},
-                    {"role": "user", "content": f"Headlines:\n- {formatted_headlines}"}
-                ],
-                temperature=0, max_tokens=5
-            )
-            sentiment = response.choices[0].message.content.strip()
-            return sentiment if sentiment in ["Bullish", "Bearish", "Neutral"] else "Neutral"
-        except Exception as e:
-            print(f"OpenAI API error: {e}")
-            return "Neutral"
+    def refresh_sentiment(self, headlines: List[str] = None) -> None:
+        if headlines is None:
+            headlines = ["Bitcoin steady", "Ethereum mixed"]
+        backoffs = [0.2, 0.5, 1.0]
+        for i, s in enumerate(backoffs + [None]):
+            try:
+                res = self._classify(headlines)
+                self.last_label = res["label"]
+                self.last_score = res["score"]
+                self.last_analysis_time = time.time()
+                self._write_status()
+                # metrics
+                METRICS.ai_refresh_total.labels(result="ok").inc()
+                METRICS.ai_confidence.set(self.last_score)
+                METRICS.ai_sentiment_value.set(
+                    1
+                    if self.last_label == "Bullish"
+                    else (-1 if self.last_label == "Bearish" else 0)
+                )
+                log.info("AI sentiment: %s (%.2f)", self.last_label, self.last_score)
+                return
+            except Exception as e:
+                if i == len(backoffs):
+                    METRICS.ai_refresh_total.labels(result="error").inc()
+                    log.error("AI refresh failed: %s", e)
+                    return
+                time.sleep(s)
