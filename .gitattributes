@@ -1,3 +1,5 @@
 ﻿*.py text=auto
 *.txt text=auto
 *.md text=auto
+requirements.txt merge=ours
+* text=auto eol=lf
