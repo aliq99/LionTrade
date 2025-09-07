@@ -71,4 +71,10 @@ websockets==15.0.1
 setuptools<81
 pydantic>=2.7,<3
 
+<<<<<<< HEAD
+=======
+
+
+pandas_ta==0.4.67b0
+>>>>>>> dd5d7b6 (ci: install pytest and run via python -m pytest)
 pytest==8.3.3
