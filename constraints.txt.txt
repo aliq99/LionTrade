@@ -1,0 +1,2 @@
+# Freeze transitive pins that cause DeprecationWarnings
+setuptools<81

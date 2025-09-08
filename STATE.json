@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "metrics": true,
+  "ai_sentiment_cached": true,
+  "risk_gates": ["stale_ai", "spread", "depth", "drawdown", "throttle"],
+  "sqlite_trades": true,
+  "ws_backoff": true,
+  "force_signal_hook": true
+}

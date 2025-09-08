@@ -1,5 +1,7 @@
-import os
+﻿import os
+
 from openai import OpenAI
+
 
 class AIStrategy:
     def __init__(self, cfg):
@@ -23,7 +25,7 @@ class AIStrategy:
             "Ethereum developers announce successful merge update, network efficiency up.",
             "Regulatory concerns in Asia cast a shadow over short-term crypto market.",
             "Major investment bank launches a dedicated crypto trading desk.",
-            "Fear & Greed Index moves into 'Extreme Greed' territory."
+            "Fear & Greed Index moves into 'Extreme Greed' territory.",
         ]
         return sample_headlines
 
@@ -44,19 +46,19 @@ class AIStrategy:
                 messages=[
                     {
                         "role": "system",
-                        "content": "You are a financial analyst specializing in cryptocurrency markets. Analyze the sentiment of the following news headlines. Respond with only a single word: Bullish, Bearish, or Neutral."
+                        "content": "You are a financial analyst specializing in cryptocurrency markets. Analyze the sentiment of the following news headlines. Respond with only a single word: Bullish, Bearish, or Neutral.",
                     },
                     {
                         "role": "user",
-                        "content": f"Here are the latest headlines:\n- {formatted_headlines}"
-                    }
+                        "content": f"Here are the latest headlines:\n- {formatted_headlines}",
+                    },
                 ],
                 temperature=0,
-                max_tokens=5
+                max_tokens=5,
             )
-            
+
             sentiment = response.choices[0].message.content.strip()
-            
+
             if sentiment in ["Bullish", "Bearish", "Neutral"]:
                 return sentiment
             else:
@@ -66,7 +68,7 @@ class AIStrategy:
         except Exception as e:
             print(f"An error occurred while calling the OpenAI API: {e}")
             return "Neutral"
-    
+
     def run_analysis_cycle(self):
         """
         Runs a full cycle of fetching news and getting sentiment.

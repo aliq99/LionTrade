@@ -1,108 +1,98 @@
 #!/usr/bin/env python3
-import os, json, time, asyncio, logging, math, csv, pathlib, datetime as dt
-from dataclasses import dataclass
+import asyncio
+import datetime as dt
+import json
+import logging
 from collections import deque
+
 from dotenv import load_dotenv
 
-# --- All imports are now grouped here at the top ---
-from strategies.scalping_strategy import ScalpingStrategy
-from strategies.momentum_strategy import MomentumStrategy
+from config.settings import cfg
 from data.websocket_manager import WebSocketManager
-from trading.risk_manager import RiskManager
-from trading.execution_engine import ExecutionEngine
+from metrics.telemetry import METRICS, start_metrics_server
+from persistence.trades_db import init_db, insert_trade
+from strategies.momentum_strategy import MomentumStrategy
+from strategies.scalping_strategy import ScalpingStrategy
 from trading.ai_analyzer import AI_Analyzer
+from trading.execution_engine import ExecutionEngine
+from trading.risk_manager import RiskManager
 
-# ---------- env & logging ----------
+# --- Environment and Logging Setup ---
 load_dotenv()
-LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(asctime)s | %(levelname)s | %(message)s")
+LOG_LEVEL = cfg.log_level.upper()
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
 logging.getLogger("websockets").setLevel(logging.WARNING)
 logging.getLogger("asyncio").setLevel(logging.WARNING)
 log = logging.getLogger("momo")
 
-# ---------- Data Handlers for Dashboard ----------
+WS_URL = cfg.ws_url  # single authoritative source for websocket URL
+
+# --- Helper Functions ---
 chart_data = deque(maxlen=200)
+
+
 def save_live_data(trade_event=None):
-    output = { "prices": list(chart_data) }
+    """Save recent prices and optional trade event to a JSON file for the dashboard."""
+    output = {"prices": list(chart_data)}
     if trade_event:
         output["trade"] = trade_event
-    with open("live_data.json", "w") as f:
-        json.dump(output, f)
-
-# ---------- config ----------
-def load_config():
     try:
-        with open("config.json", "r") as f:
-            return json.load(f)
-    except FileNotFoundError:
-        return {"strategy_name": "momentum", "symbol_ccxt": "BTC/USDT", "total_budget_usdt": 1000.0}
-bot_config = load_config()
+        with open("live_data.json", "w", encoding="utf-8") as f:
+            json.dump(output, f)
+    except Exception as e:
+        log.error("Error saving live_data.json: %s", e)
 
-@dataclass
-class Config:
-    # --- Execution Settings ---
-    execution_mode: str = bot_config.get("execution_mode", "auto")
-    large_order_threshold_usdt: float = float(bot_config.get("large_order_threshold_usdt", "500"))
-    twap_duration_minutes: int = int(bot_config.get("twap_duration_minutes", "30"))
-    twap_order_slices: int = int(bot_config.get("twap_order_slices", "10"))
-    
-    # --- Risk Management Settings ---
-    max_spread_pct: float = float(os.getenv("MAX_SPREAD_PCT", "0.001"))
-    throttle_window: int = int(os.getenv("THROTTLE_WINDOW", "20"))
-    throttle_threshold_pct: float = float(os.getenv("THROTTLE_THRESHOLD", "0.40"))
-    daily_drawdown_pct: float = float(os.getenv("DRAWDOWN_PCT", "0.02"))
 
-    # --- Budget & Position Settings ---
-    total_budget_usdt: float = float(bot_config.get("total_budget_usdt", "1000"))
-    risk_per_trade_pct: float = float(bot_config.get("risk_per_trade_pct", "0.01"))
-    stop_loss_pct: float = float(bot_config.get("stop_loss_pct", "0.004"))
-    take_profit_pct: float = float(bot_config.get("take_profit_pct", "0.01"))
-    
-    # --- Strategy-Specific Settings ---
-    ema_len: int = int(os.getenv("EMA_LEN", "12"))
-    zscore_len: int = int(os.getenv("ZSCORE_LEN", "20"))
-    zscore_entry: float = float(os.getenv("ZSCORE_ENTRY", "0.4"))
-    rsi_oversold: float = float(os.getenv("RSI_OVERSOLD", "45"))
-    rsi_overbought: float = float(os.getenv("RSI_OVERBOUGHT", "55"))
-    
-    # --- General Settings ---
-    symbol_ccxt: str = bot_config.get("symbol_ccxt", "BTC/USDT")
-    ws_url: str = os.getenv("CRYPTOCOM_WS_URL", "wss://stream.crypto.com/exchange/v1/market")
-    cooldown_sec: int = int(os.getenv("COOLDOWN_SEC", "10")) # <-- THIS LINE WAS MISSING
-    paper: bool = os.getenv("PAPER", "true").lower() == "true"
+def _log_trade(symbol, action, side, price, qty, reason="", pnl_usdt=None):
+    """Adapter to log a trade to the SQLite database."""
+    ts = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    insert_trade(ts, symbol, action, side, price, qty, reason, pnl_usdt)
 
-cfg = Config()
 
-# ---------- paths & csv helpers ----------
-BASE_DIR = pathlib.Path(__file__).parent
-TRADES_CSV = BASE_DIR / "trades.csv"
-def _ensure_trades_header():
-    if not TRADES_CSV.exists() or TRADES_CSV.stat().st_size == 0:
-        with TRADES_CSV.open("w", newline="", encoding="utf-8") as f:
-            csv.writer(f).writerow(["ts_iso","symbol","action","side","price","qty","reason","pnl_usdt"])
-def _log_trade(symbol, action, side, price, qty, reason="", pnl_usdt=""):
-    _ensure_trades_header()
-    row = [dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"), symbol, action, side, f"{price:.8f}", f"{qty:.8f}", reason, f"{pnl_usdt:.8f}" if pnl_usdt else ""]
-    with TRADES_CSV.open("a", newline="", encoding="utf-8") as f:
-        csv.writer(f).writerow(row)
+async def _ai_refresh_loop(ai_analyzer: AI_Analyzer):
+    """Background task to refresh AI sentiment periodically."""
+    while True:
+        try:
+            ai_analyzer.refresh_sentiment()
+        except Exception as e:
+            log.error("AI refresh error: %s", e)
+        await asyncio.sleep(max(60, ai_analyzer.cache_duration))
 
-# --- Bot Entry Point ---
+
+# --- Main Bot Entry Point ---
 async def main():
-    cfg = Config()
-    strategy_name = bot_config.get("strategy_name", "scalping")
-    
-    active_strategy = ScalpingStrategy(cfg) if strategy_name == "scalping" else MomentumStrategy(cfg)
-    log.info(f"Loaded {strategy_name.upper()} strategy.")
-    
-    # --- Initialize all components, including the AI Analyzer ---
+    init_db()
+    start_metrics_server(cfg.metrics_port)
+    log.info("Metrics server listening on :%d", cfg.metrics_port)
+
+    strategy_name = cfg.strategy_name
+    active_strategy = (
+        ScalpingStrategy(cfg, METRICS)
+        if strategy_name == "scalping"
+        else MomentumStrategy(cfg, METRICS)
+    )
+    log.info("Loaded %s strategy.", strategy_name.upper())
+
     ai_analyzer = AI_Analyzer()
-    risk_manager = RiskManager(cfg, ai_analyzer)
+    asyncio.create_task(_ai_refresh_loop(ai_analyzer))
+
+    risk_manager = RiskManager(cfg, ai_analyzer, METRICS)
     execution_engine = ExecutionEngine(cfg, active_strategy, _log_trade, risk_manager)
-    
-    # --- Pass all components to the manager ---
-    ws_url = cfg.ws_url 
-    manager = WebSocketManager(ws_url, active_strategy, risk_manager, execution_engine, ai_analyzer)
+    risk_manager.start_day(execution_engine.budget)
+
+    manager = WebSocketManager(
+        WS_URL,
+        active_strategy,
+        risk_manager,
+        execution_engine,
+        ai_analyzer,
+        save_live_data,
+    )
     await manager.connect()
+
 
 if __name__ == "__main__":
     try:

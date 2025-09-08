@@ -1,63 +1,57 @@
-import math
+﻿import logging
 import time
-import numpy as np
-from collections import deque
 
-# --- Math Helper Functions for this Strategy ---
-def ema(prev, x, alpha):
-    return alpha * x + (1 - alpha) * prev if prev is not None else x
-
-def zscore(series, window=60):
-    if len(series) < window:
-        return 0.0
-    arr = np.array(list(series))[-window:]
-    mu = arr.mean()
-    sd = arr.std(ddof=1)
-    if sd < 1e-12:
-        sd = 1.0
-    return float((arr[-1] - mu) / sd)
+from indicators.rolling import RollingEMA, RollingZScore
 
 
-# --- The Original Momentum Strategy Class ---
 class MomentumStrategy:
-    def __init__(self, cfg):
+    def __init__(self, cfg, metrics):  # MODIFIED: Added metrics parameter
         self.cfg = cfg
-        self.last_signal_ts = 0.0
-        self.prices = deque(maxlen=max(cfg.ema_len, cfg.zscore_len) * 3)
-        self._ema = None
-        self.pos = None  # Example: {"side":"LONG","qty":float,"entry":float}
-        self._tick = 0
+        self.metrics = metrics  # MODIFIED: Store metrics object
+        self.log = logging.getLogger("momo")
+        self.log.info("MomentumStrategy initialized.")
+
+        self.ema = RollingEMA(int(getattr(cfg, "ema_len", 12)))
+        self.zscore = RollingZScore(int(getattr(cfg, "zscore_len", 20)))
+
+        self.last_signal_ts = 0
+        self.pos = None
 
     def on_price(self, px: float):
-        """This method is for the momentum strategy and gets called by the live bot."""
-        if px is None or px <= 0 or not math.isfinite(px):
-            return None
+        """Processes a single price update and returns a signal if conditions are met."""
+        ema_val = self.ema.update(px)
+        zscore_val = self.zscore.update(px)
 
-        # --- Calculate Indicators ---
-        alpha = 2 / (self.cfg.ema_len + 1)
-        self._ema = ema(self._ema, px, alpha)
-        self.prices.append(px)
-        
-        # --- Entry Logic ---
-        if self.pos is None and len(self.prices) >= self.cfg.zscore_len:
-            momentum = px - (self._ema or px)
-            zs = zscore(self.prices, self.cfg.zscore_len)
-            
-            if momentum > 0 and zs > self.cfg.zscore_entry and not self._cooldown():
+        # Entry logic
+        if self.pos is None and zscore_val is not None:
+            momentum = px - ema_val
+            if (
+                momentum > 0
+                and zscore_val > float(self.cfg.zscore_entry)
+                and not self._cooldown()
+            ):
                 self.last_signal_ts = time.time()
+                self.metrics.signals_total.labels(
+                    action="enter_long", strategy="momentum"
+                ).inc()
                 return {"action": "enter_long", "price": px}
 
-        # --- Exit Logic ---
+        # Exit logic
         if self.pos:
-            tp = self.pos["entry"] * (1 + self.cfg.take_profit_pct)
-            sl = self.pos["entry"] * (1 + self.cfg.stop_loss_pct)
-            
+            tp = self.pos["entry"] * (1 + float(self.cfg.take_profit_pct))
+            sl = self.pos["entry"] * (1 - float(self.cfg.stop_loss_pct))
             if px >= tp:
+                self.metrics.signals_total.labels(
+                    action="exit", strategy="momentum"
+                ).inc()
                 return {"action": "exit", "price": px, "reason": "tp"}
             if px <= sl:
+                self.metrics.signals_total.labels(
+                    action="exit", strategy="momentum"
+                ).inc()
                 return {"action": "exit", "price": px, "reason": "sl"}
 
         return None
 
     def _cooldown(self):
-        return (time.time() - self.last_signal_ts) < self.cfg.cooldown_sec
+        return (time.time() - self.last_signal_ts) < int(self.cfg.cooldown_sec)
