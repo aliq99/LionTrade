@@ -1,1 +1,1 @@
-﻿create table if not exists public.healthcheck(id int primary key);
+create table if not exists public.healthcheck(id int primary key);
