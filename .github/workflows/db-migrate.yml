@@ -13,16 +13,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: "20"
       - name: Apply Supabase migrations (force IPv4)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
-          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
           set -euo pipefail
-          HOST="db.${SUPABASE_PROJECT_REF}.supabase.co"
+          HOST=$(echo "$SUPABASE_DB_URL" | sed -E 's#.*@([^:/?]+).*#\1#')
           IPV4=$(getent ahostsv4 "$HOST" | awk '{print $1; exit}')
-          [[ -z "$IPV4" ]] && { echo "No IPv4 for $HOST"; exit 1; }
-          SEP='?'; [[ "$SUPABASE_DB_URL" == *\?* ]] && SEP='&'
-          URL="${SUPABASE_DB_URL}${SEP}hostaddr=${IPV4}"
-          npx supabase --debug db push --db-url "$URL" -y
+          [ -z "$IPV4" ] && { echo "No IPv4 for $HOST"; exit 1; }
+          export PGHOSTADDR="$IPV4"            # libpq will use this address
+          PGCONNECT_TIMEOUT=15 npx supabase -y db push --db-url "$SUPABASE_DB_URL"
