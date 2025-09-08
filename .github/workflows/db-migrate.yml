@@ -1,0 +1,16 @@
+﻿name: DB Migrate
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - "supabase/migrations/**.sql"
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply Supabase migrations
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          yes | npx supabase db push --db-url "$SUPABASE_DB_URL"
