@@ -3,3 +3,4 @@
 *.md text=auto
 requirements.txt merge=ours
 * text=auto eol=lf
+*.sql text eol=lf
