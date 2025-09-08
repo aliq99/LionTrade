@@ -14,13 +14,20 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
-      - name: Apply Supabase migrations (force IPv4)
+      - name: Apply Supabase migrations (force IPv4, robust)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
-          set -euo pipefail
-          HOST=$(echo "$SUPABASE_DB_URL" | sed -E 's#.*@([^:/?]+).*#\1#')
-          IPV4=$(getent ahostsv4 "$HOST" | awk '{print $1; exit}')
-          [ -z "$IPV4" ] && { echo "No IPv4 for $HOST"; exit 1; }
-          export PGHOSTADDR="$IPV4"            # libpq will use this address
-          PGCONNECT_TIMEOUT=15 npx supabase -y db push --db-url "$SUPABASE_DB_URL"
+          set -eo pipefail
+          set -x
+          URL="$SUPABASE_DB_URL"
+          HOST=$(printf '%s\n' "$URL" | sed -E 's#.*@([^:/?]+).*#\1#')
+          IPV4=$(
+            getent hosts "$HOST" | awk '{print $1}' | grep -m1 -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' ||
+            dig +short A "$HOST" | head -n1 ||
+            nslookup -type=A "$HOST" 2>/dev/null | awk "/^Address: /{print \$2; exit}"
+          )
+          [ -n "$IPV4" ] || { echo "::error::No IPv4 for $HOST"; exit 1; }
+          export PGHOSTADDR="$IPV4"
+          echo "HOST=$HOST IPV4=$IPV4 PGHOSTADDR=$PGHOSTADDR"
+          PGCONNECT_TIMEOUT=15 npx supabase -y db push --db-url "$URL"
