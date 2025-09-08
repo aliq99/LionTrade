@@ -1,22 +1,28 @@
 ﻿name: DB Migrate
 on:
-  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
-      - "supabase/migrations/**/*.sql"
-  pull_request:
-    branches: [ main ]
-    paths:
-      - "supabase/migrations/**/*.sql"
+      - "supabase/migrations/**.sql"
+  workflow_dispatch:
 
 jobs:
   migrate:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Apply Supabase migrations
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Apply Supabase migrations (force IPv4)
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          SUPABASE_PROJECT_REF: ${{ secrets.SUPABASE_PROJECT_REF }}
         run: |
-          yes | npx supabase db push --db-url "$SUPABASE_DB_URL"
+          set -euo pipefail
+          HOST="db.${SUPABASE_PROJECT_REF}.supabase.co"
+          IPV4=$(getent ahostsv4 "$HOST" | awk '{print $1; exit}')
+          [[ -z "$IPV4" ]] && { echo "No IPv4 for $HOST"; exit 1; }
+          SEP='?'; [[ "$SUPABASE_DB_URL" == *\?* ]] && SEP='&'
+          URL="${SUPABASE_DB_URL}${SEP}hostaddr=${IPV4}"
+          npx supabase --debug db push --db-url "$URL" -y
