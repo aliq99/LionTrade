@@ -1,9 +1,15 @@
 ﻿name: DB Migrate
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
     paths:
-      - "supabase/migrations/**.sql"
+      - "supabase/migrations/**/*.sql"
+  pull_request:
+    branches: [ main ]
+    paths:
+      - "supabase/migrations/**/*.sql"
+
 jobs:
   migrate:
     runs-on: ubuntu-latest
