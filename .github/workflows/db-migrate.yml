@@ -36,7 +36,7 @@ jobs:
             export PGHOSTADDR="$IPV4"
             echo "Using IPv4 $PGHOSTADDR for $HOST"
           else
-            echo "::warning::No IPv4 for $HOST; proceeding without PGHOSTADDR (IPv6/normal DNS)."
+            echo "::warning::No IPv4 for $HOST; proceeding without PGHOSTADDR."
           fi
 
           PGCONNECT_TIMEOUT=20 npx --yes supabase -y db push --db-url "$URL"
