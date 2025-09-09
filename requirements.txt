@@ -1,4 +1,4 @@
-﻿# Core
+# Core
 python-dotenv
 websockets
 pandas
@@ -70,8 +70,9 @@ watchdog==6.0.0
 websockets==15.0.1
 setuptools<81
 pydantic>=2.7,<3
+psycopg[binary]==3.2.1
 
 
 
-pandas_ta==0.4.67b0
+pandas-ta==0.4.67b0
 pytest==8.3.3
