@@ -3,21 +3,16 @@ import os
 import signal
 import sys
 import time
+from typing import Optional
 
 import psycopg
 import requests
 
 DB_URL = os.environ.get("DATABASE_URL")
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
+ORG_ID = os.environ.get("ORG_ID")  # <-- set per-tenant; optional but recommended
+API = f"https://api.telegram.org/bot{TOKEN}" if TOKEN else None
 
-if not DB_URL:
-    print("ERROR: DATABASE_URL not set", flush=True)
-    sys.exit(1)
-if not TOKEN:
-    print("ERROR: TELEGRAM_TOKEN not set", flush=True)
-    sys.exit(1)
-
-API = f"https://api.telegram.org/bot{TOKEN}"
 stop = False
 
 
@@ -26,140 +21,145 @@ def _sigterm(_s, _f):
     stop = True
 
 
-signal.signal(signal.SIGINT, _sigterm)
-signal.signal(signal.SIGTERM, _sigterm)
-
-
-def ensure_schema(conn: psycopg.Connection) -> None:
+def ensure_schema(conn: psycopg.Connection):
     with conn.cursor() as cur:
+        # base table (your existing table may already exist)
         cur.execute(
             """
-            create table if not exists bot_heartbeats(
-                id bigserial primary key,
-                ts timestamptz not null default now()
+            CREATE TABLE IF NOT EXISTS bot_heartbeats (
+              id BIGSERIAL PRIMARY KEY,
+              ts timestamptz NOT NULL DEFAULT now()
+            );
+            """
+        )
+        # add multitenancy columns if missing
+        cur.execute("ALTER TABLE bot_heartbeats ADD COLUMN IF NOT EXISTS org_id uuid;")
+        cur.execute("ALTER TABLE bot_heartbeats ADD COLUMN IF NOT EXISTS bot_id uuid;")
+    conn.commit()
+
+
+def heartbeat(conn: psycopg.Connection, org_id: Optional[str]):
+    with conn.cursor() as cur:
+        if org_id:
+            cur.execute(
+                "INSERT INTO bot_heartbeats (org_id) VALUES (%s);",
+                (org_id,),
             )
-            """
-        )
-        cur.execute(
-            """
-            create table if not exists bot_state(
-                key text primary key,
-                value text not null
-            )
-            """
-        )
+        else:
+            cur.execute("INSERT INTO bot_heartbeats DEFAULT VALUES;")
     conn.commit()
 
 
-def get_offset(conn: psycopg.Connection) -> int:
-    with conn.cursor() as cur:
-        cur.execute("select value from bot_state where key='tg_offset'")
-        row = cur.fetchone()
-        return int(row[0]) if row else 0
-
-
-def save_offset(conn: psycopg.Connection, next_offset: int) -> None:
-    with conn.cursor() as cur:
-        cur.execute(
-            """
-            insert into bot_state(key, value)
-            values('tg_offset', %s)
-            on conflict (key) do update set value = excluded.value
-            """,
-            (str(next_offset),),
-        )
-    conn.commit()
-
-
-def heartbeat(conn: psycopg.Connection) -> None:
-    with conn.cursor() as cur:
-        cur.execute("insert into bot_heartbeats default values")
-    conn.commit()
-
-
-def send(chat_id: int, text: str) -> None:
+def tg_send(chat_id: int, text: str):
+    if not API:
+        return
     try:
         requests.post(
             f"{API}/sendMessage",
             json={"chat_id": chat_id, "text": text},
-            timeout=10,
+            timeout=15,
         )
     except Exception as e:
-        print(f"send error: {e}", flush=True)
+        print(f"sendMessage error: {e}", flush=True)
 
 
-def handle_message(chat_id: int, text: str) -> None:
-    t = (text or "").strip()
-    if not t:
+def tg_poll_loop():
+    if not API:
         return
-    lower = t.lower()
-    if lower in ("/start", "start"):
-        send(chat_id, "🦁 Welcome! Send /ping to test.\nUse /help for commands.")
-        return
-    if lower in ("/help", "help"):
-        send(chat_id, "Commands:\n/start – welcome\n/ping – health check")
-        return
-    if lower in ("/ping", "ping"):
-        send(chat_id, "🦁 pong")
-        return
+    offset = None
+    while not stop:
+        try:
+            r = requests.get(
+                f"{API}/getUpdates",
+                params={
+                    "timeout": 25,
+                    "offset": offset,
+                    "allowed_updates": ["message"],
+                },
+                timeout=30,
+            )
+            data = r.json()
+            if not data.get("ok"):
+                print(f"getUpdates not ok: {data}", flush=True)
+                time.sleep(5)
+                continue
+
+            for upd in data.get("result", []):
+                offset = upd["update_id"] + 1
+                msg = upd.get("message") or {}
+                chat = msg.get("chat") or {}
+                chat_id = chat.get("id")
+                txt = (msg.get("text") or "").strip().lower()
+
+                if not chat_id:
+                    continue
+
+                if txt in ("/start", "start", "hi", "hello"):
+                    tg_send(chat_id, "🦁 online")
+                elif txt.startswith("/ping") or txt == "ping":
+                    tg_send(chat_id, "🦁 pong")
+        except Exception as e:
+            print(f"poll error: {e}", flush=True)
+            time.sleep(5)
 
 
-def poll_updates(conn: psycopg.Connection) -> None:
-    offset = get_offset(conn)
-    params = {"timeout": 25}
-    if offset:
-        params["offset"] = offset
-    try:
-        r = requests.get(f"{API}/getUpdates", params=params, timeout=30)
-        data = r.json()
-    except Exception as e:
-        print(f"getUpdates error: {e}", flush=True)
-        time.sleep(5)
-        return
+def main():
+    if not DB_URL:
+        print("ERROR: DATABASE_URL not set", flush=True)
+        sys.exit(1)
+    if not TOKEN:
+        print("ERROR: TELEGRAM_TOKEN not set", flush=True)
+        sys.exit(1)
 
-    if not data.get("ok"):
-        print(f"getUpdates not ok: {data}", flush=True)
-        time.sleep(10)
-        return
+    signal.signal(signal.SIGTERM, _sigterm)
+    signal.signal(signal.SIGINT, _sigterm)
 
-    updates = data.get("result", [])
-    if not updates:
-        return
-
-    max_update_id = 0
-    for upd in updates:
-        max_update_id = max(max_update_id, upd.get("update_id", 0))
-        msg = upd.get("message") or upd.get("edited_message")
-        if not msg:
-            continue
-        chat = msg.get("chat") or {}
-        chat_id = chat.get("id")
-        text = msg.get("text") or ""
-        if chat_id is None:
-            continue
-        handle_message(chat_id, text)
-
-    if max_update_id:
-        save_offset(conn, max_update_id + 1)
-
-
-def main() -> None:
     print("Connecting...", flush=True)
     with psycopg.connect(DB_URL, autocommit=False) as conn:
         ensure_schema(conn)
         print("Connected. Entering loop.", flush=True)
+
+        # simple cadence: heartbeat every ~60s; poll telegram continuously
         last_hb = 0.0
         while not stop:
             now = time.time()
             if now - last_hb >= 60:
                 try:
-                    heartbeat(conn)
+                    heartbeat(conn, ORG_ID)
                     print("✓ heartbeat", flush=True)
                 except Exception as e:
                     print(f"DB error: {e}", flush=True)
-                    time.sleep(5)
                 last_hb = now
-            poll_updates(conn)
+
+            # run a short poll tick (non-blocking-ish)
+            try:
+                # one quick poll iteration (keep loop responsive)
+                r = requests.get(
+                    f"{API}/getUpdates",
+                    params={"timeout": 0, "allowed_updates": ["message"]},
+                    timeout=5,
+                )
+                data = r.json()
+                if data.get("ok"):
+                    for upd in data.get("result", []):
+                        # immediately handle and ack
+                        msg = upd.get("message") or {}
+                        chat = msg.get("chat") or {}
+                        chat_id = chat.get("id")
+                        txt = (msg.get("text") or "").strip().lower()
+                        if chat_id:
+                            if txt in ("/start", "start", "hi", "hello"):
+                                tg_send(chat_id, "🦁 online")
+                            elif txt.startswith("/ping") or txt == "ping":
+                                tg_send(chat_id, "🦁 pong")
+                    # advance offset in a separate long-poll loop if you prefer
+                else:
+                    print(f"getUpdates not ok: {data}", flush=True)
+            except Exception as e:
+                print(f"poll tick error: {e}", flush=True)
+
+            time.sleep(1)
+
     print("Shutdown clean.", flush=True)
 
 
