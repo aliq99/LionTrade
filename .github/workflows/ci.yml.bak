@@ -20,4 +20,3 @@ jobs:
       # allow "no tests collected" (exit 5) to pass
       - name: pytest (allow no tests)
         run: python -m pytest -q || [ $? -eq 5 ]
-
