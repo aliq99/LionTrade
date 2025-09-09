@@ -1,0 +1,15 @@
+app = "liontrade-bot"      # change if taken
+primary_region = "sea"     # near Edmonton
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PYTHONUNBUFFERED = "1"
+
+[processes]
+  worker = "python -m bot"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

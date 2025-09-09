@@ -70,6 +70,7 @@ watchdog==6.0.0
 websockets==15.0.1
 setuptools<81
 pydantic>=2.7,<3
+psycopg[binary]==3.2.1
 
 
 
